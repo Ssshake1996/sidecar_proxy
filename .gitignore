@@ -1,0 +1,7 @@
+.env
+docker-compose.network.yml
+sidecar-proxy
+sidecar_proxy
+prompt-audit-sidecar
+coverage.out
+*.test

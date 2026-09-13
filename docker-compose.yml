@@ -1,0 +1,43 @@
+name: prompt-audit-sidecar
+
+services:
+  audit-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PROMPT_AUDIT_DB_USER:-prompt_audit}
+      POSTGRES_PASSWORD: ${PROMPT_AUDIT_DB_PASSWORD:?set PROMPT_AUDIT_DB_PASSWORD in .env}
+      POSTGRES_DB: ${PROMPT_AUDIT_DB_NAME:-prompt_audit}
+    volumes:
+      - prompt-audit-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  sidecar-proxy:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      PROMPT_AUDIT_DATABASE_URL: postgres://${PROMPT_AUDIT_DB_USER:-prompt_audit}:${PROMPT_AUDIT_DB_PASSWORD}@audit-db:5432/${PROMPT_AUDIT_DB_NAME:-prompt_audit}?sslmode=disable
+    ports:
+      - "${PROMPT_AUDIT_PORT:-8090}:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  prompt-audit-data:

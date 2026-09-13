@@ -1,0 +1,8 @@
+.git
+.github
+.env
+docker-compose*.yml
+sidecar-proxy
+sidecar_proxy
+coverage.out
+README.md

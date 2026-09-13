@@ -1,0 +1,12 @@
+# Optional overlay for a sub2api installation that is reachable only through
+# its Docker network. Set SUB2API_DOCKER_NETWORK in .env before using it.
+services:
+  sidecar-proxy:
+    networks:
+      - default
+      - sub2api
+
+networks:
+  sub2api:
+    external: true
+    name: ${SUB2API_DOCKER_NETWORK:?set SUB2API_DOCKER_NETWORK in .env}
