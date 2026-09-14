@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prompt Audit Login</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f6f8; color: #17202a; }
+    main { width: min(380px, calc(100% - 32px)); background: #fff; border: 1px solid #d9dee5; padding: 24px; box-sizing: border-box; }
+    h1 { margin: 0 0 20px; font-size: 22px; }
+    form { display: grid; gap: 14px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #53606d; }
+    input, button { font: inherit; padding: 10px; border-radius: 4px; }
+    input { border: 1px solid #b8c1cc; }
+    button { border: 0; background: #1769aa; color: #fff; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: default; }
+    #message { min-height: 20px; color: #8a2e2e; font-size: 13px; }
+    .muted { color: #667482; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Prompt Audit</h1>
+    <p class="muted">管理员登录</p>
+    <form id="login-form">
+      <label>用户名<input id="username" name="username" autocomplete="username" required></label>
+      <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <button id="submit" type="submit">登录</button>
+      <div id="message" role="alert"></div>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById("login-form");
+    const message = document.getElementById("message");
+    const button = document.getElementById("submit");
+    const next = new URLSearchParams(location.search).get("next") || "/admin/ui";
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      message.textContent = "";
+      button.disabled = true;
+      try {
+        const response = await fetch("/admin/login", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value
+          })
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "登录失败");
+        }
+        location.href = next.startsWith("/") && !next.startsWith("//") ? next : "/admin/ui";
+      } catch (error) {
+        message.textContent = error.message;
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

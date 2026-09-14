@@ -21,7 +21,11 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Verify modules
+        run: go mod verify
       - name: Build
         run: go build -trimpath ./...
+      - name: Validate Compose
+        run: cp .env.example .env && docker compose config --quiet
       - name: Build container
         run: docker build --tag sidecar-proxy:test .

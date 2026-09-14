@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,9 @@ import (
 
 //go:embed web/admin.html
 var adminHTML []byte
+
+//go:embed web/login.html
+var loginHTML []byte
 
 func (p *ProxyServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -33,7 +37,7 @@ func (p *ProxyServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":        "ok",
 		"queue_dropped": dropped,
 	}
-	if err := p.store.Ping(ctx); err != nil {
+	if p.store == nil || p.store.Ping(ctx) != nil {
 		status = http.StatusServiceUnavailable
 		result["status"] = "degraded"
 		result["database"] = "unavailable"
@@ -43,32 +47,71 @@ func (p *ProxyServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
-	if path == "/admin/ui" && r.Method == http.MethodGet {
+	switch path {
+	case "/admin/login":
+		switch r.Method {
+		case http.MethodGet:
+			p.serveLogin(w, r)
+		case http.MethodPost:
+			p.loginAdmin(w, r)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	case "/admin/logout":
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		p.logoutAdmin(w, r)
+		return
+	case "/admin/ui":
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !p.requireAdminPage(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(adminHTML)
 		return
-	}
-	if p.cfg.AdminToken == "" {
-		writeJSONError(w, http.StatusNotFound, "admin API is disabled")
+	case "/admin/session":
+		username, ok, err := p.authenticateAdmin(r)
+		if err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "admin authentication unavailable")
+			return
+		}
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="prompt-audit"`)
+			writeJSONError(w, http.StatusUnauthorized, "admin login required")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": username})
 		return
-	}
-	if !p.authorizeAdmin(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="prompt-audit"`)
-		writeJSONError(w, http.StatusUnauthorized, "admin authentication required")
+	case "/admin":
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if _, ok, err := p.authenticateAdmin(r); err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "admin authentication unavailable")
+			return
+		} else if !ok {
+			redirectToLogin(w, r, "/admin/ui")
+			return
+		}
+		http.Redirect(w, r, "/admin/ui", http.StatusFound)
 		return
 	}
 
-	if path == "/admin" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"service": "prompt-audit-sidecar",
-			"endpoints": []string{
-				"GET /admin/ui",
-				"GET /admin/records",
-				"GET /admin/records/{id}",
-				"PATCH /admin/records/{id}",
-			},
-		})
+	if !p.requireAdminAPI(w, r) {
 		return
 	}
 	if path == "/admin/records" && r.Method == http.MethodGet {
@@ -96,28 +139,193 @@ func (p *ProxyServer) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, http.StatusNotFound, "not found")
 }
 
-func (p *ProxyServer) authorizeAdmin(r *http.Request) bool {
-	token := strings.TrimSpace(r.Header.Get("X-Prompt-Audit-Admin-Token"))
-	if token == "" {
-		authorization := strings.TrimSpace(r.Header.Get("Authorization"))
-		parts := strings.SplitN(authorization, " ", 2)
-		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-			token = strings.TrimSpace(parts[1])
-		}
+func (p *ProxyServer) serveLogin(w http.ResponseWriter, r *http.Request) {
+	if _, ok, err := p.authenticateAdmin(r); err == nil && ok {
+		http.Redirect(w, r, "/admin/ui", http.StatusFound)
+		return
 	}
-	if token == "" {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(loginHTML)
+}
+
+func (p *ProxyServer) loginAdmin(w http.ResponseWriter, r *http.Request) {
+	if p.store == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "admin authentication unavailable")
+		return
+	}
+	var credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&credentials); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid login payload")
+		return
+	}
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	ok, err := p.store.AuthenticateAdmin(ctx, credentials.Username, credentials.Password)
+	if err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "admin authentication unavailable")
+		return
+	}
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+	token, expiresAt, err := p.store.CreateAdminSession(ctx, credentials.Username, p.cfg.AdminSessionTTL)
+	if err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "could not create admin session")
+		return
+	}
+	setAdminSessionCookie(w, r, token, expiresAt)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"username":      strings.TrimSpace(credentials.Username),
+		"expires_at":    expiresAt,
+	})
+}
+
+func (p *ProxyServer) logoutAdmin(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(adminSessionCookieName); err == nil && p.store != nil {
+		ctx, cancel := contextWithTimeout(r, 2*time.Second)
+		_ = p.store.DeleteAdminSession(ctx, cookie.Value)
+		cancel()
+	}
+	clearAdminSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
+}
+
+func (p *ProxyServer) requireAdminPage(w http.ResponseWriter, r *http.Request) bool {
+	_, ok, err := p.authenticateAdmin(r)
+	if err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "admin authentication unavailable")
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(p.cfg.AdminToken)) == 1
+	if !ok {
+		redirectToLogin(w, r, r.URL.RequestURI())
+		return false
+	}
+	return true
+}
+
+func (p *ProxyServer) requireAdminAPI(w http.ResponseWriter, r *http.Request) bool {
+	_, ok, err := p.authenticateAdmin(r)
+	if err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "admin authentication unavailable")
+		return false
+	}
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="prompt-audit"`)
+		writeJSONError(w, http.StatusUnauthorized, "admin login required")
+		return false
+	}
+	return true
+}
+
+func (p *ProxyServer) authenticateAdmin(r *http.Request) (string, bool, error) {
+	if p.cfg.AdminToken != "" {
+		if token := bearerToken(r.Header); token != "" &&
+			subtle.ConstantTimeCompare([]byte(token), []byte(p.cfg.AdminToken)) == 1 {
+			return "token", true, nil
+		}
+	}
+	if p.store == nil {
+		return "", false, nil
+	}
+	cookie, err := r.Cookie(adminSessionCookieName)
+	if err != nil {
+		return "", false, nil
+	}
+	ctx, cancel := contextWithTimeout(r, 2*time.Second)
+	defer cancel()
+	return p.store.ValidateAdminSession(ctx, cookie.Value)
+}
+
+func bearerToken(headers http.Header) string {
+	authorization := strings.TrimSpace(headers.Get("Authorization"))
+	parts := strings.SplitN(authorization, " ", 2)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return strings.TrimSpace(parts[1])
+	}
+	return strings.TrimSpace(headers.Get("X-Prompt-Audit-Admin-Token"))
+}
+
+func setAdminSessionCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookieName,
+		Value:    token,
+		Path:     "/admin",
+		Expires:  expiresAt,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearAdminSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookieName,
+		Value:    "",
+		Path:     "/admin",
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func isSecureRequest(r *http.Request) bool {
+	if r != nil && r.TLS != nil {
+		return true
+	}
+	if r != nil && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		return true
+	}
+	return false
+}
+
+func redirectToLogin(w http.ResponseWriter, r *http.Request, next string) {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		next = "/admin/ui"
+	}
+	location := "/admin/login?next=" + url.QueryEscape(next)
+	http.Redirect(w, r, location, http.StatusFound)
 }
 
 func (p *ProxyServer) listRecords(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	filter := RecordFilter{
-		RequestID: strings.TrimSpace(query.Get("request_id")),
-		Query:     strings.TrimSpace(query.Get("q")),
-		Limit:     parsePositiveInt(query.Get("limit"), 50),
-		Offset:    parseNonNegativeInt(query.Get("offset"), 0),
+		RequestID:    strings.TrimSpace(query.Get("request_id")),
+		Query:        strings.TrimSpace(query.Get("q")),
+		ReviewStatus: strings.TrimSpace(query.Get("review_status")),
+		Limit:        parsePositiveInt(query.Get("limit"), 25),
+		Offset:       parseNonNegativeInt(query.Get("offset"), 0),
+	}
+	if filter.Limit > 200 {
+		filter.Limit = 200
+	}
+	if len([]byte(filter.Query)) > 256 {
+		writeJSONError(w, http.StatusBadRequest, "q is too long")
+		return
+	}
+	if filter.ReviewStatus != "" {
+		filter.ReviewStatus = strings.ToLower(filter.ReviewStatus)
+		switch filter.ReviewStatus {
+		case "pending", "approved", "flagged", "ignored":
+		default:
+			writeJSONError(w, http.StatusBadRequest, "invalid review_status")
+			return
+		}
 	}
 	if value := strings.TrimSpace(query.Get("user_id")); value != "" {
 		userID, err := strconv.ParseInt(value, 10, 64)
@@ -182,6 +390,7 @@ func (p *ProxyServer) updateRecord(w http.ResponseWriter, r *http.Request, id st
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }

@@ -34,3 +34,21 @@ CREATE INDEX IF NOT EXISTS idx_manual_prompt_audit_request
     ON manual_prompt_audit_records (request_id);
 CREATE INDEX IF NOT EXISTS idx_manual_prompt_audit_review
     ON manual_prompt_audit_records (review_status, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS manual_prompt_audit_admins (
+    username       VARCHAR(64) PRIMARY KEY,
+    password_hash  TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS manual_prompt_audit_sessions (
+    token_hash     CHAR(64) PRIMARY KEY,
+    username       VARCHAR(64) NOT NULL REFERENCES manual_prompt_audit_admins(username) ON DELETE CASCADE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at     TIMESTAMPTZ NOT NULL,
+    last_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_prompt_audit_sessions_expiry
+    ON manual_prompt_audit_sessions (expires_at);

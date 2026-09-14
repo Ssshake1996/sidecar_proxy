@@ -12,7 +12,12 @@ import (
 // Config contains only sidecar settings. It deliberately does not reuse the
 // sub2api application config so the proxy remains independently deployable.
 type Config struct {
+	// ListenAddr is retained as a compatibility alias for HTTPListenAddr.
 	ListenAddr           string
+	HTTPListenAddr       string
+	HTTPSListenAddr      string
+	TLSCertFile          string
+	TLSKeyFile           string
 	UpstreamURL          *url.URL
 	AuditDatabaseURL     string
 	IdentityDatabaseURL  string
@@ -22,6 +27,9 @@ type Config struct {
 	MaxCaptureBytes      int64
 	MaxPromptBytes       int
 	AdminToken           string
+	AdminUsername        string
+	AdminPassword        string
+	AdminSessionTTL      time.Duration
 	AllowUnknownIdentity bool
 	CaptureEmptyPrompts  bool
 	CapturePrefixes      []string
@@ -31,8 +39,20 @@ type Config struct {
 }
 
 func LoadConfig() (Config, error) {
+	httpListenAddr := strings.TrimSpace(os.Getenv("PROMPT_AUDIT_HTTP_ADDR"))
+	if httpListenAddr == "" {
+		httpListenAddr = envString("PROMPT_AUDIT_LISTEN_ADDR", ":8090")
+	}
+	httpsListenAddr := strings.TrimSpace(os.Getenv("PROMPT_AUDIT_HTTPS_ADDR"))
+	tlsCertFile := strings.TrimSpace(os.Getenv("PROMPT_AUDIT_TLS_CERT_FILE"))
+	tlsKeyFile := strings.TrimSpace(os.Getenv("PROMPT_AUDIT_TLS_KEY_FILE"))
+	adminPassword := os.Getenv("PROMPT_AUDIT_ADMIN_PASSWORD")
 	c := Config{
-		ListenAddr:           envString("PROMPT_AUDIT_LISTEN_ADDR", ":8090"),
+		ListenAddr:           httpListenAddr,
+		HTTPListenAddr:       httpListenAddr,
+		HTTPSListenAddr:      httpsListenAddr,
+		TLSCertFile:          tlsCertFile,
+		TLSKeyFile:           tlsKeyFile,
 		AuditDatabaseURL:     strings.TrimSpace(os.Getenv("PROMPT_AUDIT_DATABASE_URL")),
 		IdentityDatabaseURL:  strings.TrimSpace(os.Getenv("PROMPT_AUDIT_IDENTITY_DATABASE_URL")),
 		IdentityHMACSecret:   strings.TrimSpace(os.Getenv("PROMPT_AUDIT_IDENTITY_HMAC_SECRET")),
@@ -41,6 +61,9 @@ func LoadConfig() (Config, error) {
 		MaxCaptureBytes:      envInt64("PROMPT_AUDIT_MAX_CAPTURE_BYTES", 1<<20),
 		MaxPromptBytes:       envInt("PROMPT_AUDIT_MAX_PROMPT_BYTES", 1<<20),
 		AdminToken:           strings.TrimSpace(os.Getenv("PROMPT_AUDIT_ADMIN_TOKEN")),
+		AdminUsername:        envString("PROMPT_AUDIT_ADMIN_USERNAME", "admin"),
+		AdminPassword:        adminPassword,
+		AdminSessionTTL:      envDuration("PROMPT_AUDIT_ADMIN_SESSION_TTL", 12*time.Hour),
 		AllowUnknownIdentity: envBool("PROMPT_AUDIT_CAPTURE_UNKNOWN_IDENTITY", false),
 		CaptureEmptyPrompts:  envBool("PROMPT_AUDIT_CAPTURE_EMPTY_PROMPTS", false),
 		CapturePrefixes:      splitCSV(envString("PROMPT_AUDIT_CAPTURE_PREFIXES", "/v1,/v1beta")),
@@ -63,6 +86,28 @@ func LoadConfig() (Config, error) {
 	}
 	if c.AuditRetentionDays < 0 {
 		return Config{}, fmt.Errorf("PROMPT_AUDIT_RETENTION_DAYS cannot be negative")
+	}
+	if c.HTTPListenAddr == "" && c.HTTPSListenAddr == "" {
+		return Config{}, fmt.Errorf("at least one of PROMPT_AUDIT_HTTP_ADDR or PROMPT_AUDIT_HTTPS_ADDR is required")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return Config{}, fmt.Errorf("PROMPT_AUDIT_TLS_CERT_FILE and PROMPT_AUDIT_TLS_KEY_FILE must be configured together")
+	}
+	if c.HTTPSListenAddr != "" && (c.TLSCertFile == "" || c.TLSKeyFile == "") {
+		return Config{}, fmt.Errorf("TLS certificate and key are required when PROMPT_AUDIT_HTTPS_ADDR is configured")
+	}
+	if strings.TrimSpace(c.AdminUsername) == "" || len([]byte(c.AdminUsername)) > 64 || strings.IndexFunc(c.AdminUsername, func(r rune) bool {
+		return r == '/' || r == '\\' || r == ':' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	}) >= 0 {
+		return Config{}, fmt.Errorf("PROMPT_AUDIT_ADMIN_USERNAME must be 1-64 characters without whitespace or path separators")
+	}
+	if c.AdminPassword != "" {
+		if len([]byte(c.AdminPassword)) < 12 {
+			return Config{}, fmt.Errorf("PROMPT_AUDIT_ADMIN_PASSWORD must be at least 12 bytes when configured")
+		}
+		if strings.ContainsAny(c.AdminPassword, "\r\n") {
+			return Config{}, fmt.Errorf("PROMPT_AUDIT_ADMIN_PASSWORD cannot contain newlines")
+		}
 	}
 	if c.IdentityDatabaseURL != "" && c.IdentityHMACSecret == "" {
 		return Config{}, fmt.Errorf("PROMPT_AUDIT_IDENTITY_HMAC_SECRET is required when identity database is configured")

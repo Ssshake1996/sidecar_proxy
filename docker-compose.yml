@@ -29,8 +29,11 @@ services:
       PROMPT_AUDIT_DATABASE_URL: postgres://${PROMPT_AUDIT_DB_USER:-prompt_audit}:${PROMPT_AUDIT_DB_PASSWORD}@audit-db:5432/${PROMPT_AUDIT_DB_NAME:-prompt_audit}?sslmode=disable
     ports:
       - "${PROMPT_AUDIT_PORT:-8090}:8090"
+      - "${PROMPT_AUDIT_HTTPS_PORT:-8443}:8443"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - "${PROMPT_AUDIT_TLS_CERT_DIR:-./certs}:/run/prompt-audit/certs:ro"
     read_only: true
     tmpfs:
       - /tmp

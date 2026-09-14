@@ -5,3 +5,5 @@ sidecar_proxy
 prompt-audit-sidecar
 coverage.out
 *.test
+certs/*
+!certs/.gitkeep

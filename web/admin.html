@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,10 +7,11 @@
   <style>
     :root { color-scheme: light; font-family: system-ui, sans-serif; }
     body { margin: 0; background: #f4f6f8; color: #17202a; }
-    header { padding: 18px 24px; background: #17202a; color: #fff; }
+    header { padding: 16px 24px; background: #17202a; color: #fff; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    header button { border: 1px solid #aebdca; background: transparent; color: #fff; }
     main { max-width: 1280px; margin: 0 auto; padding: 20px; }
-    .toolbar, .detail { background: #fff; border: 1px solid #d9dee5; padding: 16px; margin-bottom: 16px; }
-    .toolbar { display: grid; grid-template-columns: 1fr 1fr 2fr 1fr auto; gap: 10px; align-items: end; }
+    .toolbar, .detail, .pager { background: #fff; border: 1px solid #d9dee5; padding: 16px; margin-bottom: 16px; }
+    .toolbar { display: grid; grid-template-columns: 1fr 2fr 1fr 1fr auto; gap: 10px; align-items: end; }
     label { display: grid; gap: 5px; font-size: 12px; color: #53606d; }
     input, select, textarea, button { font: inherit; }
     input, select, textarea { border: 1px solid #b8c1cc; padding: 8px; border-radius: 4px; background: #fff; }
@@ -18,7 +19,7 @@
     button.secondary { background: #53606d; }
     button:disabled { opacity: .55; cursor: default; }
     .table-wrap { overflow-x: auto; background: #fff; border: 1px solid #d9dee5; }
-    table { width: 100%; border-collapse: collapse; min-width: 820px; }
+    table { width: 100%; border-collapse: collapse; min-width: 900px; }
     th, td { text-align: left; border-bottom: 1px solid #e8ebef; padding: 10px; vertical-align: top; }
     th { background: #eef1f4; font-size: 12px; color: #53606d; }
     tr[data-id] { cursor: pointer; }
@@ -28,77 +29,124 @@
     .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
     .detail-grid strong { display: block; margin-top: 3px; word-break: break-word; }
     .review { display: grid; grid-template-columns: 180px 180px 1fr auto; gap: 10px; align-items: end; margin-top: 16px; }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .pager-actions { display: flex; gap: 8px; }
     #message { min-height: 20px; margin: 10px 0; color: #8a2e2e; }
+    #detail-prompt { width: 100%; box-sizing: border-box; resize: vertical; }
     @media (max-width: 900px) {
       .toolbar, .detail-grid, .review { grid-template-columns: 1fr; }
+      .pager { align-items: stretch; flex-direction: column; }
       main { padding: 12px; }
     }
   </style>
 </head>
 <body>
-  <header><strong>Prompt Audit</strong></header>
+  <header>
+    <strong>Prompt Audit</strong>
+    <span><span id="current-user" class="muted"></span> <button id="logout" class="secondary" type="button">退出</button></span>
+  </header>
   <main>
     <section class="toolbar" aria-label="Filters">
-      <label>Admin token<input id="token" type="password" autocomplete="off"></label>
-      <label>User ID<input id="user" inputmode="numeric" placeholder="optional"></label>
-      <label>Search prompt or user<input id="query" placeholder="optional"></label>
-      <label>Limit<select id="limit"><option>25</option><option selected>50</option><option>100</option><option>200</option></select></label>
-      <button id="load">Load</button>
+      <label>用户 ID<input id="user" inputmode="numeric" placeholder="可选"></label>
+      <label>搜索用户或 prompt<input id="query" placeholder="可选"></label>
+      <label>审计状态<select id="status"><option value="">全部</option><option value="pending">待审计</option><option value="approved">通过</option><option value="flagged">需处理</option><option value="ignored">忽略</option></select></label>
+      <label>每页数量<select id="limit"><option selected>25</option><option>50</option><option>100</option><option>200</option></select></label>
+      <button id="load" type="button">查询</button>
     </section>
     <div id="message" role="status"></div>
     <section class="table-wrap">
       <table>
-        <thead><tr><th>Time</th><th>User</th><th>Model</th><th>Endpoint</th><th>Prompt</th><th>Review</th></tr></thead>
-        <tbody id="rows"><tr><td colspan="6" class="muted">Enter the admin token and load records.</td></tr></tbody>
+        <thead><tr><th>时间</th><th>用户</th><th>模型</th><th>接口</th><th>Prompt 预览</th><th>状态</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="6" class="muted">正在加载...</td></tr></tbody>
       </table>
+    </section>
+    <section class="pager" aria-label="Pagination">
+      <span id="page-info" class="muted"></span>
+      <span class="pager-actions"><button id="previous" class="secondary" type="button">上一页</button><button id="next" type="button">下一页</button></span>
     </section>
     <section id="detail" class="detail" hidden>
       <div class="detail-grid">
-        <div><span class="muted">Record</span><strong id="d-id"></strong></div>
-        <div><span class="muted">Request ID</span><strong id="d-request"></strong></div>
-        <div><span class="muted">Received</span><strong id="d-time"></strong></div>
-        <div><span class="muted">User</span><strong id="d-user"></strong></div>
-        <div><span class="muted">Protocol / model</span><strong id="d-model"></strong></div>
-        <div><span class="muted">Excluded roles</span><strong id="d-excluded"></strong></div>
+        <div><span class="muted">记录</span><strong id="d-id"></strong></div>
+        <div><span class="muted">请求 ID</span><strong id="d-request"></strong></div>
+        <div><span class="muted">时间</span><strong id="d-time"></strong></div>
+        <div><span class="muted">用户</span><strong id="d-user"></strong></div>
+        <div><span class="muted">协议 / 模型</span><strong id="d-model"></strong></div>
+        <div><span class="muted">排除的角色</span><strong id="d-excluded"></strong></div>
       </div>
-      <p class="muted">User messages</p>
-      <textarea id="d-prompt" rows="10" readonly></textarea>
+      <p class="muted">用户 Prompt</p>
+      <textarea id="detail-prompt" rows="12" readonly></textarea>
       <div class="review">
-        <label>Status<select id="review-status"><option>pending</option><option>approved</option><option>flagged</option><option>ignored</option></select></label>
-        <label>Reviewer<input id="reviewer"></label>
-        <label>Note<input id="review-note"></label>
-        <button id="save-review">Save review</button>
+        <label>状态<select id="review-status"><option>pending</option><option>approved</option><option>flagged</option><option>ignored</option></select></label>
+        <label>审核人<input id="reviewer"></label>
+        <label>备注<input id="review-note"></label>
+        <button id="save-review" type="button">保存审核结果</button>
       </div>
     </section>
   </main>
   <script>
     let selectedId = "";
+    let page = 1;
+    let total = 0;
     const $ = (id) => document.getElementById(id);
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-    const headers = () => ({"Authorization": "Bearer " + $("token").value.trim()});
     const setMessage = (value) => { $("message").textContent = value || ""; };
-    async function loadRecords() {
+    const pageSize = () => Number($("limit").value) || 25;
+    const userLabel = (item) => item.username || item.email || item.user_id || "unknown";
+    async function api(path, options = {}) {
+      const response = await fetch(path, {...options, credentials: "same-origin"});
+      if (response.status === 401) {
+        location.href = "/admin/login?next=" + encodeURIComponent(location.pathname + location.search);
+        throw new Error("login required");
+      }
+      return response;
+    }
+    function renderPager() {
+      const size = pageSize();
+      const pages = Math.max(1, Math.ceil(total / size));
+      $("page-info").textContent = total ? `第 ${page} / ${pages} 页，共 ${total} 条` : "无记录";
+      $("previous").disabled = page <= 1;
+      $("next").disabled = page >= pages || total === 0;
+    }
+    async function loadSession() {
+      const response = await api("/admin/session");
+      if (!response.ok) throw new Error("session request failed: " + response.status);
+      const data = await response.json();
+      $("current-user").textContent = data.username || "";
+    }
+    async function loadRecords(resetPage = false) {
+      if (resetPage) page = 1;
       setMessage("");
-      const params = new URLSearchParams({limit: $("limit").value});
+      const params = new URLSearchParams({limit: String(pageSize()), offset: String((page - 1) * pageSize())});
       if ($("user").value.trim()) params.set("user_id", $("user").value.trim());
       if ($("query").value.trim()) params.set("q", $("query").value.trim());
-      const response = await fetch("/admin/records?" + params, {headers: headers()});
-      if (!response.ok) throw new Error("request failed: " + response.status);
+      if ($("status").value) params.set("review_status", $("status").value);
+      const response = await api("/admin/records?" + params);
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "request failed: " + response.status);
+      }
       const data = await response.json();
+      total = data.total || 0;
+      const pages = Math.max(1, Math.ceil(total / pageSize()));
+      if (page > pages) {
+        page = pages;
+        return loadRecords(false);
+      }
       $("rows").innerHTML = data.items.length ? data.items.map((item) => `
         <tr data-id="${esc(item.id)}">
           <td>${esc(new Date(item.received_at).toLocaleString())}</td>
-          <td>${esc(item.username || item.email || item.user_id || "unknown")}</td>
+          <td>${esc(userLabel(item))}</td>
           <td>${esc(item.model)}</td>
           <td>${esc(item.endpoint)}</td>
-          <td class="prompt">${esc(item.prompt_text)}</td>
+          <td class="prompt">${esc(item.prompt_preview || "")}${item.prompt_preview && item.prompt_preview.length >= 512 ? " ..." : ""}</td>
           <td>${esc(item.review_status)}</td>
-        </tr>`).join("") : '<tr><td colspan="6" class="muted">No records.</td></tr>';
+        </tr>`).join("") : '<tr><td colspan="6" class="muted">没有记录</td></tr>';
       document.querySelectorAll("tr[data-id]").forEach((row) => row.addEventListener("click", () => showDetail(row.dataset.id)));
+      renderPager();
     }
     async function showDetail(id) {
       setMessage("");
-      const response = await fetch("/admin/records/" + encodeURIComponent(id), {headers: headers()});
+      const response = await api("/admin/records/" + encodeURIComponent(id));
       if (!response.ok) throw new Error("detail request failed: " + response.status);
       const item = await response.json();
       selectedId = item.id;
@@ -106,26 +154,32 @@
       $("d-id").textContent = item.id;
       $("d-request").textContent = item.request_id;
       $("d-time").textContent = new Date(item.received_at).toLocaleString();
-      $("d-user").textContent = item.username || item.email || item.user_id || "unknown";
+      $("d-user").textContent = userLabel(item);
       $("d-model").textContent = [item.protocol, item.model].filter(Boolean).join(" / ");
       $("d-excluded").textContent = JSON.stringify(item.excluded_role_counts || {});
-      $("d-prompt").value = item.prompt_text || "";
+      $("detail-prompt").value = item.prompt_text || "";
       $("review-status").value = item.review_status || "pending";
       $("reviewer").value = item.reviewer || "";
       $("review-note").value = item.review_note || "";
     }
     async function saveReview() {
       if (!selectedId) return;
-      const response = await fetch("/admin/records/" + encodeURIComponent(selectedId), {
-        method: "PATCH", headers: {...headers(), "Content-Type": "application/json"},
+      const response = await api("/admin/records/" + encodeURIComponent(selectedId), {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
         body: JSON.stringify({review_status: $("review-status").value, reviewer: $("reviewer").value, review_note: $("review-note").value})
       });
       if (!response.ok) throw new Error("save failed: " + response.status);
-      await loadRecords();
+      await loadRecords(false);
       await showDetail(selectedId);
     }
-    $("load").addEventListener("click", () => loadRecords().catch((error) => setMessage(error.message)));
+    $("load").addEventListener("click", () => loadRecords(true).catch((error) => setMessage(error.message)));
+    $("previous").addEventListener("click", () => { if (page > 1) { page -= 1; loadRecords(false).catch((error) => setMessage(error.message)); } });
+    $("next").addEventListener("click", () => { page += 1; loadRecords(false).catch((error) => setMessage(error.message)); });
+    $("limit").addEventListener("change", () => loadRecords(true).catch((error) => setMessage(error.message)));
     $("save-review").addEventListener("click", () => saveReview().catch((error) => setMessage(error.message)));
+    $("logout").addEventListener("click", async () => { await api("/admin/logout", {method: "POST"}); location.href = "/admin/login"; });
+    Promise.all([loadSession(), loadRecords(true)]).catch((error) => setMessage(error.message));
   </script>
 </body>
 </html>

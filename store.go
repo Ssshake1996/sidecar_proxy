@@ -130,13 +130,14 @@ func (s *Store) DeleteExpired(ctx context.Context, retentionDays int) error {
 }
 
 type RecordFilter struct {
-	UserID    *int64
-	RequestID string
-	Query     string
-	From      *time.Time
-	To        *time.Time
-	Limit     int
-	Offset    int
+	UserID       *int64
+	RequestID    string
+	Query        string
+	ReviewStatus string
+	From         *time.Time
+	To           *time.Time
+	Limit        int
+	Offset       int
 }
 
 type RecordSummary struct {
@@ -153,8 +154,9 @@ type RecordSummary struct {
 	Endpoint           string         `json:"endpoint"`
 	Protocol           string         `json:"protocol"`
 	Model              string         `json:"model"`
-	Messages           []UserMessage  `json:"user_messages"`
-	PromptText         string         `json:"prompt_text"`
+	Messages           []UserMessage  `json:"user_messages,omitempty"`
+	PromptText         string         `json:"prompt_text,omitempty"`
+	PromptPreview      string         `json:"prompt_preview,omitempty"`
 	PromptSHA256       string         `json:"prompt_sha256"`
 	MessageCount       int            `json:"message_count"`
 	ParseStatus        string         `json:"parse_status"`
@@ -183,6 +185,9 @@ func (s *Store) List(ctx context.Context, filter RecordFilter) (ListResult, erro
 	if filter.Offset < 0 {
 		filter.Offset = 0
 	}
+	if filter.Offset > 1_000_000 {
+		filter.Offset = 1_000_000
+	}
 	where := []string{"1=1"}
 	args := make([]any, 0, 8)
 	add := func(condition string, value any) {
@@ -209,6 +214,9 @@ func (s *Store) List(ctx context.Context, filter RecordFilter) (ListResult, erro
 	if filter.To != nil {
 		add("received_at < $%d", *filter.To)
 	}
+	if filter.ReviewStatus != "" {
+		add("review_status = $%d", strings.ToLower(filter.ReviewStatus))
+	}
 	whereSQL := strings.Join(where, " AND ")
 	var total int
 	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM manual_prompt_audit_records WHERE "+whereSQL, args...).Scan(&total); err != nil {
@@ -216,7 +224,7 @@ func (s *Store) List(ctx context.Context, filter RecordFilter) (ListResult, erro
 	}
 	query := `SELECT id, received_at, request_id, client_request_id,
 		user_id, username_snapshot, email_snapshot, api_key_id, api_key_name_snapshot,
-		identity_source, endpoint, protocol, requested_model, user_messages_json, prompt_text, prompt_sha256,
+		identity_source, endpoint, protocol, requested_model, '[]'::jsonb, LEFT(prompt_text, 512), prompt_sha256,
 		message_count, parse_status, truncated, excluded_role_counts,
 		review_status, reviewer, review_note, reviewed_at
 		FROM manual_prompt_audit_records WHERE ` + whereSQL +
@@ -230,7 +238,7 @@ func (s *Store) List(ctx context.Context, filter RecordFilter) (ListResult, erro
 	defer rows.Close()
 	items := make([]RecordSummary, 0, filter.Limit)
 	for rows.Next() {
-		item, err := scanRecordSummary(rows)
+		item, err := scanRecordSummary(rows, false)
 		if err != nil {
 			return ListResult{}, err
 		}
@@ -257,14 +265,14 @@ func (s *Store) Get(ctx context.Context, id string) (RecordSummary, error) {
 		review_status, reviewer, review_note, reviewed_at
 		FROM manual_prompt_audit_records WHERE id = $1`
 	row := s.db.QueryRowContext(ctx, query, parsed)
-	return scanRecordSummary(row)
+	return scanRecordSummary(row, true)
 }
 
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanRecordSummary(row rowScanner) (RecordSummary, error) {
+func scanRecordSummary(row rowScanner, includePrompt bool) (RecordSummary, error) {
 	var item RecordSummary
 	var id uuid.UUID
 	var userID, keyID sql.NullInt64
@@ -298,6 +306,13 @@ func scanRecordSummary(row rowScanner) (RecordSummary, error) {
 	}
 	if item.ExcludedRoleCounts == nil {
 		item.ExcludedRoleCounts = map[string]int{}
+	}
+	if includePrompt {
+		item.PromptPreview = truncateUTF8(item.PromptText, 512)
+	} else {
+		item.PromptPreview = item.PromptText
+		item.PromptText = ""
+		item.Messages = nil
 	}
 	return item, nil
 }

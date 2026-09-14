@@ -19,4 +19,9 @@ func TestAuditSchemaDoesNotPersistResponsesOrRawBodies(t *testing.T) {
 	if !strings.Contains(lower, "manual_prompt_audit_records") {
 		t.Fatal("audit table is missing")
 	}
+	for _, required := range []string{"manual_prompt_audit_admins", "manual_prompt_audit_sessions", "password_hash", "expires_at"} {
+		if !strings.Contains(lower, required) {
+			t.Fatalf("schema is missing %q", required)
+		}
+	}
 }

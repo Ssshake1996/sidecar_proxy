@@ -206,6 +206,7 @@ func upstreamWebSocketURL(base *url.URL, request *http.Request) string {
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `{"error":%q}`, message)
 }
